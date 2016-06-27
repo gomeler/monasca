@@ -24,7 +24,6 @@ class SolidFire(checks.AgentCheck):
         """ Pull down cluster stats.
         """
         dimensions = self._set_dimensions(None, instance)
-        LOG.info("DIMENSIONS: {}".format(dimensions))
         data = {}
         num_of_metrics = 0
         # Extract cluster auth information
@@ -60,7 +59,6 @@ class SolidFire(checks.AgentCheck):
                 'cluster.clientQueueDepth': res['clientQueueDepth']}
         return data
 
-
 def retry(exc_tuple, tries=5, delay=1, backoff=2):
     # Retry decorator used for issuing API requests.
     def retry_dec(f):
@@ -77,25 +75,20 @@ def retry(exc_tuple, tries=5, delay=1, backoff=2):
                     LOG.debug('Retrying %(args)s, %(tries)s attempts '
                               'remaining...',
                               {'args': args, 'tries': _tries})
-            # NOTE(jdg): Don't log the params passed here
-            # some cmds like createAccount will have sensitive
-            # info in the params, grab only the second tuple
-            # which should be the Method
             msg = ('Retry count exceeded for command: %s' %
                   (args[1]))
             LOG.error(msg)
             raise Exception(msg)
         return func_retry
+    return retry_dec
+
 
 class SolidFireLib():
-    def __init__(self, auth):
-        self.endpoint = auth
-        self.active_cluster_info = {}
+    """ Gutted version of the Cinder driver.
 
-        self._set_active_cluster_info(auth)
-
-
-
+    Just enough to communicate with a SolidFire cluster. This is at best a
+    proof of concept for the potential buildout of this plugin.
+    """
     retryable_errors = ['xDBVersionMismatch',
                         'xMaxSnapshotsPerVolumeExceeded',
                         'xMaxClonesPerVolumeExceeded',
@@ -104,6 +97,13 @@ class SolidFireLib():
                         'xNotReadyForIO']
 
     retry_exc_tuple = (requests.exceptions.ConnectionError)
+
+    def __init__(self, auth):
+        self.endpoint = auth
+        self.active_cluster_info = {}
+        self._set_active_cluster_info(auth)
+
+
 
     @retry(retry_exc_tuple, tries=6)
     def _issue_api_request(self, method, params, version='1.0', endpoint=None):
