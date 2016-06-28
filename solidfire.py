@@ -1,13 +1,11 @@
-# Stub
-
-import logging
-import pdb
-import six
-import time
-import requests
-import warnings
 import json
+import logging
+import time
+
+import requests
 from requests.packages.urllib3 import exceptions
+import six
+import warnings
 
 import monasca_agent.collector.checks as checks
 
@@ -15,10 +13,14 @@ LOG = logging.getLogger(__name__)
 
 
 class SolidFire(checks.AgentCheck):
+    """This is very much a proof of concept plugin that was used to explore
+       how Monasca works.
+    """
 
     def __init__(self, name, init_config, agent_config):
         super(SolidFire, self).__init__(name, init_config, agent_config)
         self.sf = None
+
 
     def check(self, instance):
         """ Pull down cluster stats.
@@ -30,34 +32,54 @@ class SolidFire(checks.AgentCheck):
         auth = self._pull_auth(instance)
         self.sf = SolidFireLib(auth)
 
-        res = self._get_cluster_stats()
-        data.update(res)  
+        # Query cluster for stats
+        data.update(self._get_cluster_stats())
+        data.update(self._get_iscsi_sessions())
 
-        # Dump data
+        # Dump data upstream.
         for key, value in data.iteritems():
             if data[key] is None:
                 continue
             self.gauge(key, value, dimensions)
             num_of_metrics += 1
 
-        LOG.info("Collected {} metrics".format(num_of_metrics))
+        LOG.info('Collected %s metrics' % (num_of_metrics))
+
 
     def _pull_auth(self, instance):
-        # TODO: Add verification that all fields populated
+        """ Extract auth data from instance data.
+
+        Simple check to verify we have enough auth information to connect
+        to the SolidFire cluster.
+        """
+        for k in ['mvip', 'username', 'password']:
+            if k not in instance:
+                msg = 'Missing config value: %s' % (k)
+                LOG.error(msg)
+                raise Exception(msg)
         auth = {'mvip': instance.get('mvip'),
                 'port': instance.get('port', 443),
                 'login': instance.get('username'),
                 'passwd': instance.get('password')}
         auth['url'] = 'https://%s:%s' % (auth['mvip'],
                                          auth['port'])
-
         return auth
 
+
     def _get_cluster_stats(self):
-        res = self.sf._issue_api_request('GetClusterStats', {}, '8.0')['result']['clusterStats']
+        res = (self.sf.issue_api_request('GetClusterStats', {}, '8.0')
+               ['result']['clusterStats'])
         data = {'cluster.clusterUtilization': res['clusterUtilization'],
                 'cluster.clientQueueDepth': res['clientQueueDepth']}
         return data
+
+
+    def _get_iscsi_sessions(self):
+        res = (self.sf.issue_api_request('ListISCSISessions', {}, '8.0')
+               ['result'])
+        data = {'cluster.iSCSISessionCount': len(res['sessions'])}
+        return data
+
 
 def retry(exc_tuple, tries=5, delay=1, backoff=2):
     # Retry decorator used for issuing API requests.
@@ -83,11 +105,10 @@ def retry(exc_tuple, tries=5, delay=1, backoff=2):
     return retry_dec
 
 
-class SolidFireLib():
+class SolidFireLib(object):
     """ Gutted version of the Cinder driver.
 
-    Just enough to communicate with a SolidFire cluster. This is at best a
-    proof of concept for the potential buildout of this plugin.
+    Just enough to communicate with a SolidFire cluster for POC.
     """
     retryable_errors = ['xDBVersionMismatch',
                         'xMaxSnapshotsPerVolumeExceeded',
@@ -104,9 +125,8 @@ class SolidFireLib():
         self._set_active_cluster_info(auth)
 
 
-
     @retry(retry_exc_tuple, tries=6)
-    def _issue_api_request(self, method, params, version='1.0', endpoint=None):
+    def issue_api_request(self, method, params, version='1.0', endpoint=None):
         if params is None:
             params = {}
         if endpoint is None:
@@ -127,8 +147,7 @@ class SolidFireLib():
                 (response['error']['name'] in self.retryable_errors)):
             msg = ('Retryable error (%s) encountered during '
                    'SolidFire API call.' % response['error']['name'])
-            LOG.debug(msg)
-            raise Exception(message=msg)
+            raise Exception(msg)
 
         if 'error' in response:
             msg = ('API response: %s') % response
@@ -140,14 +159,12 @@ class SolidFireLib():
     def _set_active_cluster_info(self, endpoint):
         self.active_cluster_info['endpoint'] = endpoint
 
-        for k, v in self._issue_api_request(
+        for k, v in self.issue_api_request(
                 'GetClusterInfo',
                 {})['result']['clusterInfo'].items():
             self.active_cluster_info[k] = v
 
         # Add a couple extra things that are handy for us
         self.active_cluster_info['clusterAPIVersion'] = (
-            self._issue_api_request('GetClusterVersionInfo',
-                                    {})['result']['clusterAPIVersion'])
-        LOG.info("Set the endpoint")
-        LOG.info("{}".format(self.active_cluster_info))
+            self.issue_api_request('GetClusterVersionInfo',
+                                   {})['result']['clusterAPIVersion'])
