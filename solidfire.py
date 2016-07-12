@@ -9,8 +9,8 @@ import warnings
 
 import monasca_agent.collector.checks as checks
 
-LOG = logging.getLogger(__name__)
 
+LOG = logging.getLogger(__name__)
 
 class SolidFire(checks.AgentCheck):
     """This is very much a proof of concept plugin that was used to explore
@@ -20,12 +20,15 @@ class SolidFire(checks.AgentCheck):
     def __init__(self, name, init_config, agent_config):
         super(SolidFire, self).__init__(name, init_config, agent_config)
         self.sf = None
+        self.instance = None
 
 
     def check(self, instance):
         """ Pull down cluster stats.
         """
-        dimensions = self._set_dimensions(None, instance)
+        self.cluster = instance.get('name')
+        dimensions = {'service': 'solidfire',
+                      'cluster': self.cluster}
         data = {}
         num_of_metrics = 0
         # Extract cluster auth information
@@ -34,7 +37,10 @@ class SolidFire(checks.AgentCheck):
 
         # Query cluster for stats
         data.update(self._get_cluster_stats())
-        data.update(self._get_iscsi_sessions())
+        # Query for active cluster faults.
+        data.update(self._list_cluster_faults())
+        # Query for cluster capacity info
+        data.update(self._get_cluster_capacity())
 
         # Dump data upstream.
         for key, value in data.iteritems():
@@ -69,15 +75,102 @@ class SolidFire(checks.AgentCheck):
     def _get_cluster_stats(self):
         res = (self.sf.issue_api_request('GetClusterStats', {}, '8.0')
                ['result']['clusterStats'])
-        data = {'cluster.clusterUtilization': res['clusterUtilization'],
-                'cluster.clientQueueDepth': res['clientQueueDepth']}
+        # Cluster utilization is the overall load.
+        data = {'solidfire.clusterUtilization': res['clusterUtilization']}
         return data
 
 
-    def _get_iscsi_sessions(self):
-        res = (self.sf.issue_api_request('ListISCSISessions', {}, '8.0')
-               ['result'])
-        data = {'cluster.iSCSISessionCount': len(res['sessions'])}
+    def _get_cluster_capacity(self):
+         res = (self.sf.issue_api_request('GetClusterCapacity', {}, '8.0')
+               ['result']['clusterCapacity'])
+
+         # Number of 4KiB blocks with data after the last garbage collection
+         non_zero_blocks = res['nonZeroBlocks']
+         # Number of 4KiB blocks without data after the last garbage collection
+         zero_blocks = res['zeroBlocks']
+         # Number of blocks(not always 4KiB) stored on block drives.
+         unique_blocks = res['uniqueBlocks']
+         # Amount of space the unique blocks take on the block drives.
+         unique_blocks_space = res['uniqueBlocksUsedSpace']
+
+         # Amount of space consumed by the block services, including cruft.
+         active_block_space = res['activeBlockSpace']
+         # Maximum amount of bytes allocated to the block services.
+         max_block_space = res['maxUsedSpace']
+
+         # Amount of space consumed by the metadata services.
+         active_slice_space = res['usedMetadataSpace']
+         # Amount of space consumed by the metadata services for snapshots.
+         active_snap_space = res['usedMetadataSpaceInSnapshots']
+         # Maximum amount of bytes allocated to the metadata services.
+         max_slice_space = res['maxUsedMetadataSpace']
+
+         # Volume provisioned space
+         prov_space = res['provisionedSpace']
+         # Max provisionable space if 100% metadata space used.
+         max_prov_space = res['maxProvisionedSpace']
+         # Overprovision limit.
+         max_overprov_space = res['maxOverProvisionableSpace']
+
+         # Number of active iSCSI sessions.
+         iscsi_sessions = res['activeSessions']
+         # Average IOPS since midnight UTC.
+         avg_iops = res['averageIOPS']
+         # Peak IOPS since midnight UTC.
+         peak_iops = res['peakIOPS']
+         # Current IOPs over the last 5 seconds.
+         current_iops = res['currentIOPS']
+         # Theoretical max IOPS
+         max_iops = res['maxIOPS']
+
+         # Single-node clusters can report zero values for some divisors.
+         thin_factor, dedup_factor, comp_factor = 1,1,1
+         # Same calculations used in the SolidFire UI.
+         if non_zero_blocks:
+             # Thin provisioning factor
+             thin_factor = (non_zero_blocks + zero_blocks) / non_zero_blocks
+         if unique_blocks:
+             # Data deduplication factor
+             dedup_factor = non_zero_blocks / unique_blocks
+         if unique_blocks_space:
+             # 4096 constant from our internal block size, pre-compression
+             # Compression efficiency factor
+             comp_factor = (unique_blocks * 4096)/unique_blocks_space
+         # Overall data reduction efficiency factor
+         eff_factor = thin_factor * dedup_factor * comp_factor
+
+         data = {'solidfire.iscsi_sessions': iscsi_sessions,
+                 'solidfire.average_iops': avg_iops,
+                 'solidfire.peak_iops': peak_iops,
+                 'solidfire.current_iops': current_iops,
+                 'solidfire.max_iops': max_iops,
+                 'solidfire.provisioned_space': prov_space,
+                 'solidfire.max_provisioned_space': max_prov_space,
+                 'solidfire.max_overprovisioned_space': max_overprov_space,
+                 'solidfire.max_block_space': max_block_space,
+                 'solidfire.active_block_space': active_block_space,
+                 'solidfire.max_meta_space': max_slice_space,
+                 'solidfire.active_meta_space': active_slice_space,
+                 'solidfire.active_snapshot_space': active_snap_space,
+                 'solidfire.non_zero_blocks': non_zero_blocks,
+                 'solidfire.zero_blocks': zero_blocks,
+                 'solidfire.unique_blocks': unique_blocks,
+                 'solidfire.unique_blocks_used_space': unique_blocks_space,
+                 'solidfire.thin_provision_factor': thin_factor,
+                 'solidfire.deduplication_factor': dedup_factor,
+                 'solidfire.compression_factor': comp_factor,
+                 'solidfire.data_reduction_factor': eff_factor
+                 }
+         return data
+
+
+    def _list_cluster_faults(self):
+        # Report the number of active faults. Might be useful for an alarm?
+        res = (self.sf.issue_api_request('ListClusterFaults',
+                                         {'faultTypes': 'current'},
+                                         '8.0')
+               ['result']['faults'])
+        data = {'solidfire.active_cluster_faults': len(res)}
         return data
 
 
