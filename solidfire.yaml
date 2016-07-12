@@ -1,8 +1,0 @@
-init_config:
-    test_key: test_value
-
-instances:
-    - name: cluster_one
-      username: admin
-      password: admin
-      mvip: 192.168.139.100
